@@ -1,27 +1,52 @@
 const STOP_URL = "https://kogda.by/stops/minsk/%D0%9B%D0%B5%D0%B9%D1%82%D0%B5%D0%BD%D0%B0%D0%BD%D1%82%D0%B0%20%D0%9A%D0%B8%D0%B6%D0%B5%D0%B2%D0%B0%D1%82%D0%BE%D0%B2%D0%B0";
-const YANDEX_MAPS_URL = "https://yandex.ru/maps/157/minsk/?mode=transit";
+const TARGET_ROUTES = new Set(["73", "59", "172"]);
 
-// The user supplied only a time window, not a separate arrival time for each route.
-// This remains an honest scheduled window; the source link lets the recipient check live data.
+function text(value) {
+  return value.replace(/<[^>]+>/g, " ").replace(/&nbsp;/g, " ").replace(/\s+/g, " ").trim();
+}
+
+export function parseNearestArrivals(html) {
+  const rows = [];
+  const rowPattern = /<div\b(?=[^>]*\bdata-route="(73|59|172)")(?=[^>]*\bdata-interval="(\d+)")[^>]*>([\s\S]*?)<\/div>/g;
+  for (const match of html.matchAll(rowPattern)) {
+    const [, route, interval, content] = match;
+    const direction = text(content.match(/<span class="direction">([\s\S]*?)<\/span>/)?.[1] ?? "");
+    rows.push({ route, minutes: Number(interval), direction });
+  }
+
+  return rows
+    .filter((row) => TARGET_ROUTES.has(row.route))
+    .sort((a, b) => a.minutes - b.minutes)
+    .reduce((result, row) => {
+      if ((result[row.route] ?? []).length < 2) (result[row.route] ??= []).push(row);
+      return result;
+    }, {});
+}
+
+function formatArrivals(arrivals) {
+  const lines = [];
+  for (const route of ["73", "59", "172"]) {
+    const rows = arrivals[route] ?? [];
+    if (!rows.length) {
+      lines.push(`${route} — нет ближайшего рейса в табло.`);
+      continue;
+    }
+    lines.push(`${route} — ${rows.map((row) => `через ${row.minutes} мин${row.direction ? ` (${row.direction})` : ""}`).join("; ")}`);
+  }
+  return lines.join("\n");
+}
+
 export async function getTransport() {
-  // A lightweight availability check makes failures visible without depending on undocumented APIs.
   try {
     const response = await fetch(STOP_URL, {
       headers: { "User-Agent": "MorningMinskTelegramBot/1.0" },
       signal: AbortSignal.timeout(12_000)
     });
     if (!response.ok) throw new Error(String(response.status));
+    const arrivals = parseNearestArrivals(await response.text());
+    if (!Object.keys(arrivals).length) throw new Error("arrival board not found");
+    return `Остановка «Лейтенанта Кижеватова» — ближайшие прибытия:\n${formatArrivals(arrivals)}`;
   } catch {
-    return [
-      "73 автобус, 59 троллейбус, 172 автобус — ориентировочно в интервале 08:35–08:47.",
-      "Источник расписания сейчас недоступен; проверьте актуальное движение в Яндекс Картах.",
-      YANDEX_MAPS_URL
-    ].join("\n");
+    return "Не удалось получить онлайн-табло транспорта. Откройте остановку «Лейтенанта Кижеватова» в Яндекс Картах.";
   }
-
-  return [
-    "Остановка «Лейтенанта Кижеватова».",
-    "73 автобус, 59 троллейбус, 172 автобус — ориентировочно в интервале 08:35–08:47.",
-    `Актуальное движение: ${YANDEX_MAPS_URL}`
-  ].join("\n");
 }
